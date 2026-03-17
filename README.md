@@ -37,3 +37,42 @@ After modify, use `import.py` and you get `*.out` file. Using `Kerameru` to repl
 
 # Warning
 `extract.py` cannot extract whole PAPA files, it can only extract text datas (from Msg.xbb)
+
+## 3. Advanced JSON Format & Repacking
+If you want to work with a cleaner JSON format (similar to MSBT structure) and repack it back to `.xbb`, follow these steps:
+
+### 3-1. Prepare Files
+1. Place your `Msg.xbb` in `rom/ExtractedRomFS/Msg.xbb` (or adjust scripts).
+2. Run `tool_xbb.py` to extract raw data:
+   ```bash
+   python3 tool_xbb.py rom/ExtractedRomFS/Msg.xbb
+   ```
+   This creates `rom/ExtractedRomFS/Msg_json`.
+
+### 3-2. Convert to Formatted JSON
+Run `convert_format.py` to create the formatted JSON files in `work/Msg_formatted_json`:
+```bash
+python3 convert_format.py rom/ExtractedRomFS/Msg_json work/Msg_formatted_json
+```
+The output files will have a structure like:
+```json
+{
+  "source_file": "file_XXXX.papa",
+  "entries": [
+    { "name": "Label", "message": "Text...", "original": "Text...", "translation": "" }
+  ]
+}
+```
+
+### 3-3. Translate
+Edit the `.json` files in `work/Msg_formatted_json`. Put your translation in the `"translation"` field.
+
+### 3-4. Repack to XBB
+Run `repack_xbb.py` to build the new `.xbb` file:
+```bash
+python3 repack_xbb.py work/Msg_formatted_json work/Msg_repacked.xbb
+```
+You can now use `work/Msg_repacked.xbb` in your game (rename it to `Msg.xbb`).
+
+### Helper Scripts
+- `merge_json.py`: Merges Japanese and Korean JSONs (legacy).
