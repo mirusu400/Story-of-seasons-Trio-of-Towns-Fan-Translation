@@ -2,306 +2,390 @@ import struct
 import os
 import json
 import glob
-import codecs
 
-def padding(_bytes):
-    _bytes += b"\x00"
-    while len(_bytes) % 4 != 0:
-        _bytes += b"\x00"
-    return _bytes
 
-def check_encoding(text):
-    for char in text:
-        if ord(char) > 0xFF:
-            return "utf-16"
+def pad_text_bytes(b, enc):
+    if enc in ("utf-16", "utf-16-le", "utf16"):
+        b += b"\x00\x00"
+    else:
+        b += b"\x00"
+    while len(b) % 4 != 0:
+        b += b"\x00"
+    return b
+
+
+def encode_text(text, enc):
+    if enc in ("utf-16", "utf-16-le", "utf16"):
+        b = text.encode("utf-16-le")
+        return pad_text_bytes(b, "utf-16")
+    if enc in ("shift-jis", "shift_jis", "sjis"):
+        b = text.encode("shift_jis")
+        return pad_text_bytes(b, "shift-jis")
+    b = text.encode("ascii")
+    return pad_text_bytes(b, "ascii")
+
+
+def check_encoding_raw(btext):
+    count = 0
+    for char in btext:
+        if char == 0x0:
+            count += 1
+            continue
+        if 0x30 <= char <= 0x7E:
+            continue
+        return "utf-16"
+    if count >= 5:
+        return "utf-16"
     return "ascii"
 
-def build_papa_block(entries):
-    # Entries is a list of text strings for one block?
-    # Wait, the original PAPA structure had multiple blocks.
-    # The formatted JSON structure flattens everything into "entries".
-    # BUT wait, the formatted JSON has "entry_count".
-    # In `extract.py`, `PAPA` file had `lensubfile` blocks.
-    # In `convert_format.py`, I iterated over `data` which was a list of blocks!
-    # Each block had `idx` and `offsets`.
-    # My `convert_format.py` FLATTENED the blocks into a single list of entries?
-    # Let's check `convert_format.py` again.
-    # `data = json.load(f)` -> list of blocks.
-    # `for entry in data:` -> iterating blocks.
-    # Inside loop, I created ONE `formatted_entry` per block?
-    # Yes. `entries.append(formatted_entry)`.
-    # So `entries` in formatted JSON corresponds to BLOCKS in PAPA.
-    # Each block has ONE "message" and ONE "name".
-    # Wait, `tool_xbb.py` extracted `offsets` list for each block.
-    # A block can contain MULTIPLE strings?
-    # `subfile` returns `(offsets, texts, encodings)`.
-    # `texts` is a list of strings in that block.
-    # `file_0000.json` (original) has:
-    # `idx`: 0, `offsets`: [20, 24, 120], `0`: "Msg", `1`: Text, `2`: Label.
-    # So one block has multiple strings.
-    # My `convert_format.py` took `val1` and `val2` (TEXT and LABEL).
-    # It ignored "Msg".
-    # So I effectively reduced each block to (Label, Text).
-    # Is it always valid that a block has exactly Label and Text?
-    # In `file_0000.json`, yes.
-    # But `extract.py` loop: `for i in range(len(texts)): data[str(i)] = ...`
-    # So a block CAN have arbitrary number of strings.
-    # If I only saved Label and Text, I might have lost "Msg" or other strings if there were more than 3?
-    # "Msg" is usually at index 0.
-    # If there are other strings, `convert_format.py` might have missed them or just picked the first utf-16/ascii.
-    
-    # However, `import.py` logic:
-    # `bheader = b"PAPA"`
-    # `bunknown = ...`
-    # It reconstructs the block using `offsets` from JSON.
-    # But my formatted JSON DOES NOT HAVE OFFSETS.
-    # It only has "message" and "name".
-    # So I need to RE-CALCULATE offsets.
-    # And I need to reconstruct the "Msg" string if it was there?
-    # `convert_format.py` ignored "Msg".
-    # If "Msg" is required for the game, I MUST put it back.
-    # I should assume "Msg" is always the first string?
-    # Or check if "Msg" is standard.
-    # `file_0000.json` had "Msg" at index 0.
-    
-    # If I want to rebuild the PAPA exactly, I need to know ALL strings in the block.
-    # My `convert_format.py` simplified the data structure significantly.
-    # If the game relies on "Msg" being there, the new PAPA file might crash if I omit it.
-    # Also, the order matters.
-    # Original: Msg, Text, Label (or Msg, Label, Text).
-    # My formatted JSON: just Name and Message.
-    # I need to know the order.
-    # `convert_format.py` logic was heuristic.
-    
-    # To be safe, I should update `convert_format.py` to preserve ALL strings in a block, 
-    # perhaps in a list, or assume a standard structure (Msg, Label, Text).
-    # But the user wants "Label" and "Message" fields.
-    # Maybe I should add "hidden_strings" or something?
-    
-    # Let's assume for now that standard structure is `Msg`, `Label`, `Text` (or similar).
-    # I will add "Msg" back hardcoded if it's missing?
-    # Or better, I'll update `convert_format.py` to check for "Msg" and store it?
-    # Actually, `convert_format.py` skipped "Msg".
-    # If I rebuild without "Msg", offsets will change.
-    # The game uses offsets to find strings.
-    # If I change offsets, but update the offset table, it should be fine IF the game uses the offset table.
-    # `PAPA` format HAS an offset table.
-    # So as long as I generate a valid offset table, it should be fine.
-    # The only risk is if the game expects "Msg" to be at index 0.
-    # I will assume "Msg" is needed and add it back at index 0.
-    # And then Label/Text.
-    # Which order?
-    # JPN: Msg, Text, Label.
-    # KOR: Msg, Label, Text.
-    # The user is translating. Presumably KOR?
-    # The file `file_0000.json` in `work/Msg_json` (if it came from `rom/ExtractedRomFS/Msg.xbb`)
-    # `rom/ExtractedRomFS` is likely JPN or US?
-    # The text was Japanese.
-    # So it was Msg, Text, Label.
-    # I should reconstruct as Msg, Text, Label to be safe?
-    # Or does it matter?
-    # If I output KOR text, maybe I should use KOR order (Msg, Label, Text)?
-    # But `import.py` says:
-    # JPN => STAMP TEXT LABEL
-    # ENG => STAMP LABEL TEXT
-    # If I'm making a translation patch for the JPN game (to KOR), I might need to keep JPN structure or switch to KOR structure if the game logic allows.
-    # Usually, the game code reads string by index (0, 1, 2).
-    # If I change order, I break it.
-    # JPN game expects Index 1 = Text.
-    # So I MUST put Text at Index 1.
-    # Msg at Index 0.
-    # Label at Index 2.
-    
-    pass
 
-def json_to_papa(json_data):
-    # json_data is the formatted JSON dict
-    entries = json_data["entries"] # List of blocks
-    
+def parse_papa_blocks(papa_path):
     blocks = []
-    
-    for entry in entries:
-        # Use block_strings if available (created by new convert_format.py)
-        if "block_strings" in entry:
-            strings = []
-            block_strings = entry["block_strings"]
-            # Sort by index just in case
-            block_strings.sort(key=lambda x: x["index"])
-            
-            translation = entry.get("translation", "")
-            
-            for s_data in block_strings:
-                text = s_data["text"]
-                enc = s_data["enc"]
-                
-                # Apply translation if this is the message
-                if s_data.get("is_message") and translation:
-                    text = translation
-                    
-                # Encode
-                try:
-                    if enc == "utf-16":
-                        b_text = text.encode("utf-16-le")
-                    else:
-                        b_text = text.encode("ascii")
-                except UnicodeEncodeError:
-                    # Fallback or robust handling
-                    print(f"Warning: Encoding failed for '{text}' as {enc}. Fallback to utf-16-le.")
-                    b_text = text.encode("utf-16-le")
-                    
-                b_text = padding(b_text)
-                strings.append(b_text)
-                
-        else:
-            # Fallback for old format (should not happen if you run convert_format.py first)
-            # ... (Old logic omitted for brevity, assuming new format)
-            print("Error: Old JSON format detected. Please re-run convert_format.py.")
-            return b""
+    with open(papa_path, "rb") as f:
+        if f.read(4) != b"PAPA":
+            raise ValueError(f"Not a PAPA file: {papa_path}")
 
-        # Now build the block
-        # Header of block is Size(4) + Count(4).
-        # Offsets start at 0x08.
-        
-        current_offset = 8 + len(strings) * 4
+        f.seek(0x0C)
+        _header_size = struct.unpack("<I", f.read(4))[0]
+        block_count = struct.unpack("<I", f.read(4))[0]
+
         offsets = []
-        
-        for s in strings:
-            offsets.append(current_offset)
-            current_offset += len(s)
-            
-        # Build Block Data
-        # Block Size = current_offset (Total size)
-        
-        block_data = bytearray()
-        block_data += struct.pack('<I', current_offset)
-        block_data += struct.pack('<I', len(strings))
-        
-        for off in offsets:
-            block_data += struct.pack('<I', off)
-            
-        for s in strings:
-            block_data += s
-            
-        blocks.append(block_data)
-        
-    # Now build PAPA file
-    # Header: PAPA + ...
-    
+        for _ in range(block_count):
+            offsets.append(struct.unpack("<I", f.read(4))[0])
+
+        file_size = os.path.getsize(papa_path)
+
+        for i, block_offset in enumerate(offsets):
+            if i == len(offsets) - 1:
+                block_size = file_size - block_offset
+            else:
+                block_size = offsets[i + 1] - block_offset
+
+            f.seek(block_offset)
+            header = f.read(8)
+            if len(header) < 8:
+                blocks.append({"raw": [], "is_dummy": True})
+                continue
+
+            _blocksize, offsetcount = struct.unpack("<II", header)
+            if offsetcount == 0:
+                blocks.append({"raw": [], "is_dummy": True})
+                continue
+
+            sub_offsets = []
+            for _ in range(offsetcount):
+                sub_offsets.append(struct.unpack("<I", f.read(4))[0])
+
+            sizes = []
+            for j in range(len(sub_offsets)):
+                if j != 0:
+                    sizes.append(sub_offsets[j] - sub_offsets[j - 1])
+            sizes.append(block_size - sub_offsets[-1])
+
+            raw_strings = []
+            for j, sub_off in enumerate(sub_offsets):
+                f.seek(block_offset + sub_off)
+                raw = f.read(sizes[j])
+                raw_strings.append(raw)
+
+            blocks.append({"raw": raw_strings, "is_dummy": False})
+
+    return blocks
+
+
+def build_block(raw_strings):
+    count = len(raw_strings)
+    offsets = []
+    current_offset = 8 + (count * 4)
+    for b in raw_strings:
+        offsets.append(current_offset)
+        current_offset += len(b)
+
+    block_data = bytearray()
+    block_data += struct.pack("<I", current_offset)
+    block_data += struct.pack("<I", count)
+    for off in offsets:
+        block_data += struct.pack("<I", off)
+    for b in raw_strings:
+        block_data += b
+    return block_data
+
+
+def build_papa(blocks_raw):
+    blocks = [build_block(b) for b in blocks_raw]
+    dummy_block = b"\x00" * 8
+    blocks.append(dummy_block)
+
+    lensubfile = len(blocks)
+    header_size = (lensubfile * 4) + 0x08
+    first_block_offset = (lensubfile * 4) + 0x14
+
+    block_offsets = [first_block_offset]
+    for i in range(lensubfile - 1):
+        block_offsets.append(block_offsets[i] + len(blocks[i]))
+
     papa_data = bytearray()
-    papa_data += b'PAPA'
-    papa_data += b'\x00\x00\x00\x00' # Unknown
-    papa_data += b'\x0C\x00\x00\x00' # Unknown 2 (Header Size?) -> 0x0C always?
-    
-    count = len(blocks)
-    header_size = (count * 4) + 8
-    
-    papa_data += struct.pack('<I', header_size)
-    papa_data += struct.pack('<I', count)
-    
-    # Calculate Block Offsets
-    first_block_offset = 0x14 + (count * 4)
-    block_offsets = []
-    current_block_offset = first_block_offset
-    
-    for blk in blocks:
-        block_offsets.append(current_block_offset)
-        current_block_offset += len(blk)
-        
+    papa_data += b"PAPA"
+    papa_data += b"\x00\x00\x00\x00"
+    papa_data += b"\x0C\x00\x00\x00"
+    papa_data += struct.pack("<I", header_size)
+    papa_data += struct.pack("<I", lensubfile)
     for off in block_offsets:
-        papa_data += struct.pack('<I', off)
-        
+        papa_data += struct.pack("<I", off)
     for blk in blocks:
         papa_data += blk
-        
     return papa_data
 
-def repack_xbb(input_dir, output_xbb):
+
+def get_translation_text(entry):
+    translation = (entry.get("translation") or "").strip()
+    if translation:
+        return translation
+    message = entry.get("message") or ""
+    original = entry.get("original") or ""
+    if message and message != original:
+        return message
+    return ""
+
+
+def find_message_index(entry, raw_strings):
+    block_strings = entry.get("block_strings") or []
+    for s in block_strings:
+        if s.get("is_message"):
+            try:
+                return int(s.get("index"))
+            except Exception:
+                pass
+    for key in ("message_index", "msg_index", "message_idx"):
+        if key in entry:
+            try:
+                return int(entry[key])
+            except Exception:
+                pass
+
+    best_idx = None
+    best_len = -1
+    for i, raw in enumerate(raw_strings):
+        enc = check_encoding_raw(raw)
+        if enc == "utf-16" and len(raw) > best_len:
+            best_len = len(raw)
+            best_idx = i
+    return best_idx
+
+
+def get_message_encoding(entry, msg_idx, raw_strings):
+    for key in ("message_encoding", "message_enc", "encoding"):
+        enc = entry.get(key)
+        if enc:
+            return enc
+    block_strings = entry.get("block_strings") or []
+    for s in block_strings:
+        try:
+            if s.get("is_message") and int(s.get("index", -1)) == msg_idx:
+                return s.get("enc") or "utf-16"
+        except Exception:
+            continue
+    if msg_idx is not None and msg_idx < len(raw_strings):
+        return check_encoding_raw(raw_strings[msg_idx])
+    return "utf-16"
+
+
+def guess_papa_path(json_path, data, papa_dir):
+    source = data.get("source_file")
+    if source:
+        candidate = os.path.join(papa_dir, source)
+        if os.path.exists(candidate):
+            return candidate
+    base = os.path.splitext(os.path.basename(json_path))[0]
+    for ext in (".papa", ".bin"):
+        candidate = os.path.join(papa_dir, base + ext)
+        if os.path.exists(candidate):
+            return candidate
+    return None
+
+
+def apply_translations(blocks, entries, json_name):
+    out_blocks = []
+    entry_index = 0
+
+    for block in blocks:
+        if block.get("is_dummy"):
+            continue
+
+        if entry_index >= len(entries):
+            print(f"Warning: {json_name} has fewer entries than blocks. Truncating.")
+            break
+
+        raw_strings = list(block["raw"])
+        entry = entries[entry_index]
+        entry_index += 1
+
+        translation = get_translation_text(entry)
+        if translation:
+            msg_idx = find_message_index(entry, raw_strings)
+            if msg_idx is None or msg_idx >= len(raw_strings):
+                print(f"Warning: {json_name} entry {entry_index - 1} missing message index.")
+            else:
+                enc = get_message_encoding(entry, msg_idx, raw_strings)
+                try:
+                    raw_strings[msg_idx] = encode_text(translation, enc)
+                except UnicodeEncodeError:
+                    print(
+                        f"Warning: Encoding failed for entry {entry_index - 1} using {enc}. "
+                        "Fallback to utf-16."
+                    )
+                    raw_strings[msg_idx] = encode_text(translation, "utf-16")
+
+        out_blocks.append(raw_strings)
+
+    return out_blocks
+
+
+def read_xbb_template(template_path):
+    if not template_path or not os.path.exists(template_path):
+        return None
+    with open(template_path, "rb") as f:
+        if f.read(4) != b"XBB\x01":
+            return None
+        count = struct.unpack("<I", f.read(4))[0]
+        f.seek(0x20)
+        entries = []
+        for _ in range(count):
+            data = f.read(16)
+            if len(data) < 16:
+                break
+            offset, size, unk1, unk2 = struct.unpack("<IIII", data)
+            entries.append((offset, size, unk1, unk2))
+    return entries
+
+
+def plan_xbb_layout(papa_files, template_entries, table_offset=0x20):
+    table_end = table_offset + (len(papa_files) * 16)
+    if not papa_files:
+        return [], table_end, False
+
+    if template_entries and len(template_entries) == len(papa_files):
+        template_offsets = [offset for offset, _size, _u1, _u2 in template_entries]
+        template_sizes = [size for _offset, size, _u1, _u2 in template_entries]
+        data_base = max(table_end, min(template_offsets))
+
+        if all(len(papa) == size for papa, size in zip(papa_files, template_sizes)):
+            return template_offsets, data_base, True
+
+        offsets = [data_base]
+        for i in range(1, len(papa_files)):
+            prev_template_end = template_offsets[i - 1] + template_sizes[i - 1]
+            gap = template_offsets[i] - prev_template_end
+            if gap < 0:
+                gap = 0
+            offsets.append(offsets[-1] + len(papa_files[i - 1]) + gap)
+        return offsets, data_base, False
+
+    offsets = [table_end]
+    for papa in papa_files[:-1]:
+        offsets.append(offsets[-1] + len(papa))
+    return offsets, table_end, False
+
+
+def repack_xbb(input_dir, output_xbb, papa_dir=None, template_xbb=None):
     files = glob.glob(os.path.join(input_dir, "*.json"))
-    files.sort() # Ensure order matches file_0000, file_0001...
-    
+    files.sort()
+
+    if papa_dir is None:
+        parent = os.path.dirname(os.path.abspath(input_dir))
+        candidate = os.path.join(parent, "Msg_unpacked")
+        papa_dir = candidate if os.path.isdir(candidate) else input_dir
+
+    if template_xbb is None:
+        candidate = os.path.join("rom", "ExtractedRomFS", "Msg.xbb")
+        if os.path.exists(candidate):
+            template_xbb = candidate
+
     print(f"Repacking {len(files)} files from {input_dir} to {output_xbb}...")
-    
+
     papa_files = []
-    
     for json_file in files:
-        with open(json_file, 'r', encoding='utf-8') as f:
+        with open(json_file, "r", encoding="utf-8") as f:
             data = json.load(f)
-            
-        papa_data = json_to_papa(data)
+
+        papa_path = guess_papa_path(json_file, data, papa_dir)
+        if not papa_path:
+            raise FileNotFoundError(f"Missing source PAPA for {json_file}")
+
+        blocks = parse_papa_blocks(papa_path)
+        entries = data.get("entries") or []
+        blocks_raw = apply_translations(blocks, entries, os.path.basename(json_file))
+        papa_data = build_papa(blocks_raw)
         papa_files.append(papa_data)
-        
-    # Build XBB
-    # Header: XBB\x01 (4) + Count (4) + Padding/Unk (0x20 - 8 = 24 bytes?)
-    # `tool_xbb.py`: `f.seek(0x20)`. Table starts at 0x20.
-    
-    xbb_data = bytearray()
-    xbb_data += b'XBB\x01'
-    xbb_data += struct.pack('<I', len(papa_files))
-    # Fill 0x08 to 0x20 with 0x00?
-    # `extract.py`/hex dump showed 0s.
-    xbb_data += b'\x00' * (0x20 - 8)
-    
-    # Entry Table
-    # Offset (4), Size (4), Unk1 (4), Unk2 (4) per file.
-    # 16 bytes per entry.
-    
+
+    template_entries = read_xbb_template(template_xbb)
+    template_bytes = None
+    if template_xbb and os.path.exists(template_xbb):
+        with open(template_xbb, "rb") as f:
+            template_bytes = f.read()
     table_offset = 0x20
-    data_offset = table_offset + (len(papa_files) * 16)
-    
-    # Alignment?
-    # XBB files often align to 0x10 or 0x20?
-    # Let's align data start to 0x40 or something if needed.
-    # Looking at hex dump:
-    # 0x20: First entry.
-    # 0x... Data starts.
-    # `70 90 00 00` -> 0x9070.
-    # 0x20 + (871 * 16) = 32 + 13936 = 13968 (0x3690).
-    # First file starts at 0x9070.
-    # There is a gap between table end (0x3690) and first file (0x9070).
-    # 0x9070 - 0x3690 = 0x59E0 (23008 bytes).
-    # Maybe string names are there? Or just padding?
-    # If I just pack tightly, will it work?
-    # Probably safer to align to 0x10 or 0x20.
-    # I'll simply append data after table.
-    
+    offsets, data_base, preserve_template_gaps = plan_xbb_layout(
+        papa_files, template_entries, table_offset
+    )
+
+    xbb_data = bytearray()
+    xbb_data += b"XBB\x01"
+    xbb_data += struct.pack("<I", len(papa_files))
+    xbb_data += b"\x00" * (0x20 - 8)
+
     entries = []
-    current_data_offset = data_offset
-    
-    # Align first file to 0x40? or just append?
-    # I'll just append for now.
-    
-    for papa in papa_files:
-        size = len(papa)
-        entries.append((current_data_offset, size))
-        current_data_offset += size
-        # Padding between files?
-        # `tool_xbb.py` didn't skip padding.
-        
-    # Write Table
-    for offset, size in entries:
-        xbb_data += struct.pack('<I', offset)
-        xbb_data += struct.pack('<I', size)
-        xbb_data += b'\x00\x00\x00\x00' # Unk1
-        xbb_data += b'\x00\x00\x00\x00' # Unk2
-        
-    # Write Data
-    for papa in papa_files:
+    for offset, papa in zip(offsets, papa_files):
+        entries.append((offset, len(papa)))
+
+    for i, (offset, size) in enumerate(entries):
+        if template_entries and i < len(template_entries):
+            _toff, _tsize, unk1, unk2 = template_entries[i]
+        else:
+            unk1 = 0
+            unk2 = 0
+        xbb_data += struct.pack("<I", offset)
+        xbb_data += struct.pack("<I", size)
+        xbb_data += struct.pack("<I", unk1)
+        xbb_data += struct.pack("<I", unk2)
+
+    if len(xbb_data) < data_base:
+        if preserve_template_gaps and template_bytes and len(template_bytes) >= data_base:
+            xbb_data += template_bytes[len(xbb_data):data_base]
+        else:
+            xbb_data += b"\x00" * (data_base - len(xbb_data))
+
+    current_len = len(xbb_data)
+    for i, papa in enumerate(papa_files):
+        target_offset = entries[i][0]
+        if current_len < target_offset:
+            if preserve_template_gaps and template_bytes and len(template_bytes) >= target_offset:
+                xbb_data += template_bytes[current_len:target_offset]
+            else:
+                xbb_data += b"\x00" * (target_offset - current_len)
         xbb_data += papa
-        
-    with open(output_xbb, 'wb') as f:
+        current_len = len(xbb_data)
+
+    with open(output_xbb, "wb") as f:
         f.write(xbb_data)
-        
+
     print(f"Created {output_xbb}")
+
 
 if __name__ == "__main__":
     import sys
-    # Default
+
     input_dir = "work/Msg_formatted_json"
     output_xbb = "work/Msg_repacked.xbb"
-    
+    papa_dir = None
+    template_xbb = None
+
     if len(sys.argv) > 1:
         input_dir = sys.argv[1]
     if len(sys.argv) > 2:
         output_xbb = sys.argv[2]
-        
-    repack_xbb(input_dir, output_xbb)
+    if len(sys.argv) > 3:
+        papa_dir = sys.argv[3]
+    if len(sys.argv) > 4:
+        template_xbb = sys.argv[4]
+
+    repack_xbb(input_dir, output_xbb, papa_dir, template_xbb)
