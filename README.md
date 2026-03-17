@@ -15,6 +15,50 @@ You can extract / build bffnt files using [3dsTool](https://github.com/ObsidianX
 
 On a `/font` directory, I make a example manifest file and sheet PSD (photoshop) files for korean glyphs. You can modify and make your own font.
 
+### 1-1. Setup
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+```
+
+### 1-2. Extract / Build BFFNT
+Extract a font into a manifest and PNG sheets:
+```bash
+.venv/bin/python tool_font.py extract rom/ExtractedRomFS/Font/mainfont.bffnt work/mainfont_extract
+```
+
+Build a font back from extracted assets:
+```bash
+.venv/bin/python tool_font.py build font/mainfont_manifest.json work/mainfont.bffnt
+```
+
+### 1-3. One-line Korean Main Font Build
+Append the bundled Korean donor glyph set to an original `mainfont.bffnt` and rebuild it:
+```bash
+.venv/bin/python tool_font.py build-from-font rom/ExtractedRomFS/Font/mainfont.bffnt ./KangwonBold.otf work/mainfont_from_ttf.bffnt --chars-file font/font_raw.txt --font-size 14
+```
+
+If you also want the merged manifest and PNG sheets for inspection:
+```bash
+.venv/bin/python tool_font.py build-from-font rom/ExtractedRomFS/Font/mainfont.bffnt ./KangwonBold.otf work/mainfont_from_ttf.bffnt --chars-file font/font_raw.txt --font-size 14 --keep-dir work/mainfont_from_ttf_assets 
+```
+
+### 1-4. Render Glyphs Directly From a Font File
+Render Hangul directly from a `ttf` / `otf` / `ttc` and append it to a base BFFNT:
+```bash
+.venv/bin/python tool_font.py build-from-font rom/ExtractedRomFS/Font/mainfont.bffnt /System/Library/Fonts/Supplemental/AppleGothic.ttf work/mainfont_from_ttf.bffnt --chars-file font/font_raw.txt --font-size 14
+```
+
+Useful tuning flags:
+```bash
+.venv/bin/python tool_font.py build-from-font rom/ExtractedRomFS/Font/mainfont.bffnt /path/to/font.ttf work/mainfont_from_ttf.bffnt --chars-file font/font_raw.txt --font-size 14 --x-offset 0 --y-offset 0 --keep-dir work/mainfont_from_ttf_assets
+```
+
+If you want to enumerate the font's own cmap instead of using `font_raw.txt`:
+```bash
+.venv/bin/python tool_font.py build-from-font rom/ExtractedRomFS/Font/mainfont.bffnt /path/to/font.ttc work/mainfont_from_ttf.bffnt --all-font-glyphs --font-index 0
+```
+
 
 ## 2. Edit texts
 Story of Seasons use custom archiving structure, you should unpack yourself.
