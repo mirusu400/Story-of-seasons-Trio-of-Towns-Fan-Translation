@@ -120,3 +120,36 @@ You can now use `work/Msg_repacked.xbb` in your game (rename it to `Msg.xbb`).
 
 ### Helper Scripts
 - `merge_json.py`: Merges Japanese and Korean JSONs (legacy).
+
+## 4. Translate Graphics
+Most translatable UI graphics in `rom/ExtractedRomFS/Layout/*.arc` are `SARC` archives containing `bflim` images.
+Use `tool_gfx.py` to scan candidates, extract them as PNG, edit them, and repack the archive.
+
+### 4-1. Scan likely graphic candidates
+```bash
+.venv/bin/python tool_gfx.py scan --limit 40 --json work/gfx_candidates.json
+```
+
+### 4-2. Extract one archive to PNG
+```bash
+.venv/bin/python tool_gfx.py extract-arc rom/ExtractedRomFS/Layout/EventTitle.arc work/gfx_edit
+```
+
+This creates:
+- `work/gfx_edit/EventTitle/raw/...` original `bflim` / `bflyt` files
+- `work/gfx_edit/EventTitle/png/...` editable PNG files
+- `work/gfx_edit/EventTitle/manifest.json`
+
+### 4-3. Repack edited PNGs back to ARC
+```bash
+.venv/bin/python tool_gfx.py repack-arc work/gfx_edit/EventTitle work/EventTitle_patched.arc
+```
+
+Only PNG files whose contents changed are re-encoded back into `bflim`.
+
+### 4-4. Extract a starter set
+```bash
+.venv/bin/python tool_gfx.py extract-default-set work/gfx_default
+```
+
+This extracts a small starter set of likely text-bearing graphics such as title, event title, logo, post office, and communication-room UI.
