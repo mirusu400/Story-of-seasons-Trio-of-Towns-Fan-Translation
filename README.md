@@ -17,7 +17,7 @@ On a `/font` directory, I make a example manifest file and sheet PSD (photoshop)
 
 ### 1-1. Setup
 ```bash
-python3 -m venv .venv
+python -m venv .venv
 .venv/bin/pip install -r requirements.txt
 ```
 

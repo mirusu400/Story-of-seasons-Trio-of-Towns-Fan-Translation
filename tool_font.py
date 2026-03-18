@@ -7,6 +7,7 @@ import json
 import math
 import shutil
 import tempfile
+import uuid
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
@@ -14,6 +15,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 ROOT = Path(__file__).resolve().parent
 VENDORED_BFFNT = ROOT / "tools" / "bffnt.py"
+WORK_TMP_ROOT = ROOT / "work" / ".tmp"
 
 
 @contextlib.contextmanager
@@ -37,6 +39,17 @@ def load_bffnt_module():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+@contextlib.contextmanager
+def managed_tempdir(prefix):
+    WORK_TMP_ROOT.mkdir(parents=True, exist_ok=True)
+    tmp_dir = WORK_TMP_ROOT / f"{prefix}{uuid.uuid4().hex}"
+    tmp_dir.mkdir(parents=True, exist_ok=False)
+    try:
+        yield tmp_dir
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 def manifest_base_name(manifest_path):
@@ -94,6 +107,14 @@ def validate_compatible_layout(base_manifest, donor_manifest):
     ):
         if base[key] != donor[key]:
             raise ValueError(f"Incompatible BFFNT layout for {key}: {base[key]} != {donor[key]}")
+
+
+def validate_glyph_transfer_layout(base_manifest, donor_manifest):
+    base = glyph_layout(base_manifest)
+    donor = glyph_layout(donor_manifest)
+    for key in ("cell_width", "cell_height"):
+        if base[key] != donor[key]:
+            raise ValueError(f"Incompatible glyph cell layout for {key}: {base[key]} != {donor[key]}")
 
 
 def glyph_rect(index, manifest):
@@ -223,8 +244,7 @@ def build_bffnt(manifest_path, output_bffnt):
     target_base = output_bffnt.stem
     source_dir = manifest_path.parent
 
-    with tempfile.TemporaryDirectory(prefix="gm3_bffnt_build_") as tmp_dir:
-        tmp_dir = Path(tmp_dir)
+    with managed_tempdir("gm3_bffnt_build_") as tmp_dir:
         shutil.copy2(manifest_path, tmp_dir / f"{target_base}_manifest.json")
 
         for index, image_path in enumerate(sheet_paths(source_dir, source_base)):
@@ -277,6 +297,26 @@ def load_font_characters(font_path, font_index=0):
     return [chr(codepoint) for codepoint in sorted(cmap.keys())]
 
 
+def collect_requested_characters(
+    font_file,
+    chars_file=None,
+    all_font_glyphs=False,
+    hangul_only=False,
+    font_index=0,
+):
+    if all_font_glyphs:
+        characters = load_font_characters(font_file, font_index=font_index)
+    elif chars_file:
+        characters = ordered_unique_characters(load_text_auto(chars_file))
+    else:
+        raise ValueError("Either chars_file or all_font_glyphs must be provided")
+
+    if hangul_only:
+        characters = [char for char in characters if 0xAC00 <= ord(char) <= 0xD7A3]
+
+    return characters
+
+
 def rgba_from_alpha(alpha_image):
     rgba = Image.new("RGBA", alpha_image.size, (255, 255, 255, 0))
     rgba.putalpha(alpha_image)
@@ -318,6 +358,7 @@ def render_font_glyphs(
     base_manifest_path,
     font_file,
     output_dir,
+    characters=None,
     chars_file=None,
     all_font_glyphs=False,
     hangul_only=False,
@@ -326,6 +367,9 @@ def render_font_glyphs(
     x_offset=0,
     y_offset=0,
     start_at_new_sheet=True,
+    replace_existing=False,
+    preserve_existing_metrics=False,
+    metric_overrides=None,
 ):
     base_manifest_path = Path(base_manifest_path).resolve()
     output_dir = Path(output_dir).resolve()
@@ -343,23 +387,24 @@ def render_font_glyphs(
     layout = glyph_layout(merged_manifest)
     base_chars = set(merged_manifest["glyphMap"].keys())
 
-    if all_font_glyphs:
-        characters = load_font_characters(font_file, font_index=font_index)
-    elif chars_file:
-        characters = ordered_unique_characters(load_text_auto(chars_file))
-    else:
-        raise ValueError("Either chars_file or all_font_glyphs must be provided")
+    if characters is None:
+        characters = collect_requested_characters(
+            font_file,
+            chars_file=chars_file,
+            all_font_glyphs=all_font_glyphs,
+            hangul_only=hangul_only,
+            font_index=font_index,
+        )
 
-    if hangul_only:
-        characters = [char for char in characters if 0xAC00 <= ord(char) <= 0xD7A3]
-
-    characters = [char for char in characters if char not in base_chars]
+    if not replace_existing:
+        characters = [char for char in characters if char not in base_chars]
 
     pil_font = ImageFont.truetype(
         str(font_file),
         size=font_size or layout["cell_height"],
         index=font_index,
     )
+    metric_overrides = metric_overrides or {}
 
     next_index = max((int(key) for key in merged_manifest["glyphWidths"].keys()), default=-1) + 1
     if start_at_new_sheet and next_index % layout["per_sheet"] != 0:
@@ -380,13 +425,21 @@ def render_font_glyphs(
             x_offset=x_offset,
             y_offset=y_offset,
         )
-        ensure_sheet_count(merged_images, merged_manifest, next_index)
-        target_sheet, target_box = glyph_rect(next_index, merged_manifest)
+        if replace_existing and char in merged_manifest["glyphMap"]:
+            target_index = merged_manifest["glyphMap"][char]
+        else:
+            target_index = next_index
+            ensure_sheet_count(merged_images, merged_manifest, target_index)
+            next_index += 1
+
+        target_sheet, target_box = glyph_rect(target_index, merged_manifest)
         clear_glyph_cell(merged_images[target_sheet], target_box)
-        merged_images[target_sheet].paste(glyph_bitmap, target_box[:2], glyph_bitmap)
-        merged_manifest["glyphMap"][char] = next_index
-        merged_manifest["glyphWidths"][str(next_index)] = metrics
-        next_index += 1
+        merged_images[target_sheet].paste(glyph_bitmap, target_box)
+        merged_manifest["glyphMap"][char] = target_index
+        if not (preserve_existing_metrics and char in base_chars):
+            merged_manifest["glyphWidths"][str(target_index)] = copy.deepcopy(
+                metric_overrides.get(char, metrics)
+            )
 
     output_base = manifest_base_name(base_manifest_path)
     output_manifest_path = output_dir / f"{output_base}_manifest.json"
@@ -401,11 +454,11 @@ def render_font_glyphs(
     }
 
 
-def donor_characters(base_manifest, donor_manifest, hangul_only=False):
+def donor_characters(base_manifest, donor_manifest, hangul_only=False, include_existing=False):
     base_chars = set(base_manifest["glyphMap"].keys())
     chars = []
     for char, donor_index in sorted(donor_manifest["glyphMap"].items(), key=lambda item: item[1]):
-        if char in base_chars:
+        if not include_existing and char in base_chars:
             continue
         if hangul_only and not (0xAC00 <= ord(char) <= 0xD7A3):
             continue
@@ -413,7 +466,13 @@ def donor_characters(base_manifest, donor_manifest, hangul_only=False):
     return chars
 
 
-def merge_donor_assets(base_manifest_path, donor_manifest_path, output_dir, hangul_only=False):
+def merge_donor_assets(
+    base_manifest_path,
+    donor_manifest_path,
+    output_dir,
+    hangul_only=False,
+    replace_existing=False,
+):
     base_manifest_path = Path(base_manifest_path).resolve()
     donor_manifest_path = Path(donor_manifest_path).resolve()
     output_dir = Path(output_dir).resolve()
@@ -421,7 +480,7 @@ def merge_donor_assets(base_manifest_path, donor_manifest_path, output_dir, hang
 
     base_manifest = load_manifest(base_manifest_path)
     donor_manifest = load_manifest(donor_manifest_path)
-    validate_compatible_layout(base_manifest, donor_manifest)
+    validate_glyph_transfer_layout(base_manifest, donor_manifest)
 
     base_images = load_sheet_images(base_manifest_path.parent, base_manifest_path)
     donor_images = load_sheet_images(donor_manifest_path.parent, donor_manifest_path)
@@ -434,23 +493,33 @@ def merge_donor_assets(base_manifest_path, donor_manifest_path, output_dir, hang
     merged_widths = merged_manifest["glyphWidths"]
     next_index = max((int(key) for key in merged_widths.keys()), default=-1) + 1
 
-    added_chars = donor_characters(base_manifest, donor_manifest, hangul_only=hangul_only)
-    for char in added_chars:
+    transferred_chars = donor_characters(
+        base_manifest,
+        donor_manifest,
+        hangul_only=hangul_only,
+        include_existing=replace_existing,
+    )
+    for char in transferred_chars:
         donor_index = donor_manifest["glyphMap"][char]
         donor_widths = donor_manifest["glyphWidths"].get(str(donor_index))
         if donor_widths is None:
             raise KeyError(f"Missing donor glyph width for index {donor_index} ({char!r})")
 
-        ensure_sheet_count(merged_images, merged_manifest, next_index)
         source_sheet, source_box = glyph_rect(donor_index, donor_manifest)
-        target_sheet, target_box = glyph_rect(next_index, merged_manifest)
+        if replace_existing and char in merged_manifest["glyphMap"]:
+            target_index = merged_manifest["glyphMap"][char]
+        else:
+            target_index = next_index
+            ensure_sheet_count(merged_images, merged_manifest, target_index)
+            next_index += 1
+
+        target_sheet, target_box = glyph_rect(target_index, merged_manifest)
         glyph_bitmap = donor_images[source_sheet].crop(source_box)
         clear_glyph_cell(merged_images[target_sheet], target_box)
-        merged_images[target_sheet].paste(glyph_bitmap, target_box[:2], glyph_bitmap)
+        merged_images[target_sheet].paste(glyph_bitmap, target_box)
 
-        merged_manifest["glyphMap"][char] = next_index
-        merged_widths[str(next_index)] = copy.deepcopy(donor_widths)
-        next_index += 1
+        merged_manifest["glyphMap"][char] = target_index
+        merged_widths[str(target_index)] = copy.deepcopy(donor_widths)
 
     output_base = manifest_base_name(base_manifest_path)
     output_manifest_path = output_dir / f"{output_base}_manifest.json"
@@ -459,9 +528,50 @@ def merge_donor_assets(base_manifest_path, donor_manifest_path, output_dir, hang
 
     return {
         "manifest": output_manifest_path,
-        "added": added_chars,
+        "added": transferred_chars,
         "sheet_count": merged_manifest["textureInfo"]["sheetCount"],
         "glyph_count": len(merged_manifest["glyphWidths"]),
+    }
+
+
+def rebase_assets_to_reference_layout(base_manifest_path, reference_manifest_path, output_dir):
+    base_manifest_path = Path(base_manifest_path).resolve()
+    reference_manifest_path = Path(reference_manifest_path).resolve()
+    output_dir = Path(output_dir).resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    base_manifest = load_manifest(base_manifest_path)
+    reference_manifest = load_manifest(reference_manifest_path)
+    validate_glyph_transfer_layout(base_manifest, reference_manifest)
+
+    base_images = load_sheet_images(base_manifest_path.parent, base_manifest_path)
+    rebased_manifest = copy.deepcopy(base_manifest)
+    rebased_manifest["textureInfo"]["sheetInfo"] = copy.deepcopy(
+        reference_manifest["textureInfo"]["sheetInfo"]
+    )
+    rebased_manifest["textureInfo"]["sheetCount"] = 0
+
+    max_index = max((int(index) for index in rebased_manifest["glyphWidths"].keys()), default=-1)
+    rebased_images = []
+    if max_index >= 0:
+        ensure_sheet_count(rebased_images, rebased_manifest, max_index)
+
+    for char, source_index in sorted(base_manifest["glyphMap"].items(), key=lambda item: item[1]):
+        source_sheet, source_box = glyph_rect(source_index, base_manifest)
+        target_sheet, target_box = glyph_rect(source_index, rebased_manifest)
+        glyph_bitmap = base_images[source_sheet].crop(source_box)
+        clear_glyph_cell(rebased_images[target_sheet], target_box)
+        rebased_images[target_sheet].paste(glyph_bitmap, target_box)
+
+    output_base = manifest_base_name(base_manifest_path)
+    output_manifest_path = output_dir / f"{output_base}_manifest.json"
+    save_manifest(rebased_manifest, output_manifest_path)
+    save_sheet_images(rebased_images, output_dir, output_base)
+
+    return {
+        "manifest": output_manifest_path,
+        "sheet_count": rebased_manifest["textureInfo"]["sheetCount"],
+        "glyph_count": len(rebased_manifest["glyphWidths"]),
     }
 
 
@@ -471,8 +581,7 @@ def build_korean_mainfont(base_bffnt, output_bffnt, donor_dir, keep_dir=None, ha
     if not donor_manifest.exists():
         raise FileNotFoundError(f"Missing donor manifest: {donor_manifest}")
 
-    with tempfile.TemporaryDirectory(prefix="gm3_font_merge_") as tmp_dir:
-        tmp_dir = Path(tmp_dir)
+    with managed_tempdir("gm3_font_merge_") as tmp_dir:
         extracted_dir = tmp_dir / "base"
         merged_dir = tmp_dir / "merged"
 
@@ -505,16 +614,52 @@ def build_font_from_file(
     y_offset=0,
     start_at_new_sheet=True,
 ):
-    with tempfile.TemporaryDirectory(prefix="gm3_font_render_") as tmp_dir:
-        tmp_dir = Path(tmp_dir)
+    requested_characters = collect_requested_characters(
+        font_file,
+        chars_file=chars_file,
+        all_font_glyphs=all_font_glyphs,
+        hangul_only=hangul_only,
+        font_index=font_index,
+    )
+    bundled_manifest = ROOT / "font" / f"{Path(base_bffnt).stem}_manifest.json"
+    characters_to_render = requested_characters
+    metric_overrides = {}
+
+    with managed_tempdir("gm3_font_render_") as tmp_dir:
         extracted_dir = tmp_dir / "base"
+        rebased_base_dir = tmp_dir / "rebased_base"
         rendered_dir = tmp_dir / "rendered"
 
-        base_manifest = extract_bffnt(base_bffnt, extracted_dir)
+        extracted_base_manifest = extract_bffnt(base_bffnt, extracted_dir)
+        extracted_base_data = load_manifest(extracted_base_manifest)
+        extracted_base_chars = set(extracted_base_data["glyphMap"].keys())
+        characters_to_render = [
+            char for char in requested_characters if char not in extracted_base_chars
+        ]
+
+        if bundled_manifest.exists():
+            bundled_data = load_manifest(bundled_manifest)
+            if all(char in bundled_data["glyphMap"] for char in characters_to_render):
+                rebase_result = rebase_assets_to_reference_layout(
+                    extracted_base_manifest,
+                    bundled_manifest,
+                    rebased_base_dir,
+                )
+                base_manifest = rebase_result["manifest"]
+                for char in characters_to_render:
+                    donor_index = bundled_data["glyphMap"][char]
+                    metric_overrides[char] = copy.deepcopy(
+                        bundled_data["glyphWidths"][str(donor_index)]
+                    )
+            else:
+                base_manifest = extracted_base_manifest
+        else:
+            base_manifest = extracted_base_manifest
         result = render_font_glyphs(
             base_manifest,
             font_file,
             rendered_dir,
+            characters=characters_to_render,
             chars_file=chars_file,
             all_font_glyphs=all_font_glyphs,
             hangul_only=hangul_only,
@@ -523,6 +668,7 @@ def build_font_from_file(
             x_offset=x_offset,
             y_offset=y_offset,
             start_at_new_sheet=start_at_new_sheet,
+            metric_overrides=metric_overrides,
         )
         build_bffnt(result["manifest"], output_bffnt)
 

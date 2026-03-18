@@ -127,21 +127,25 @@ TGLP_DATA_OFFSET = 0x2000
 
 
 class Bffnt:
-    order = None
-    invalid = False
-    file_size = 0
-    filename = ''
-    font_info = {}
-    tglp = {}
-    cwdh_sections = []
-    cmap_sections = []
-
     def __init__(self, verbose=False, debug=False, load_order='<'):
         self.verbose = verbose
         self.debug = debug
         self.load_order = load_order
+        self._reset_state()
+
+    def _reset_state(self):
+        self.order = None
+        self.invalid = False
+        self.file_size = 0
+        self.filename = ''
+        self.font_info = {}
+        self.tglp = {}
+        self.cwdh_sections = []
+        self.cmap_sections = []
+        self.sections = 0
 
     def read(self, filename):
+        self._reset_state()
         data = open(filename, 'rb').read()
         self.file_size = len(data)
         self.filename = filename
@@ -189,6 +193,7 @@ class Bffnt:
         self._parse_tglp_data(data)
 
     def load(self, json_filename):
+        self._reset_state()
         json_data = json.load(open(json_filename, 'r', encoding="utf-8"))
 
         self.order = self.load_order

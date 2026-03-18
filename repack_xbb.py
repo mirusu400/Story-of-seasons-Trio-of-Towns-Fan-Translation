@@ -241,6 +241,21 @@ def apply_translations(blocks, entries, json_name):
     return out_blocks
 
 
+def fit_papa_to_original_size(papa_data, original_size, json_name):
+    current_size = len(papa_data)
+    if current_size > original_size:
+        overflow = current_size - original_size
+        raise ValueError(
+            f"{json_name} grew by {overflow} bytes. "
+            "Shorten translations in this file, or offset them with shorter "
+            "translations in the same file."
+        )
+    if current_size < original_size:
+        # Keep the original XBB layout stable by extending the trailing dummy block.
+        papa_data += b"\x00" * (original_size - current_size)
+    return papa_data
+
+
 def read_xbb_template(template_path):
     if not template_path or not os.path.exists(template_path):
         return None
@@ -316,6 +331,9 @@ def repack_xbb(input_dir, output_xbb, papa_dir=None, template_xbb=None):
         entries = data.get("entries") or []
         blocks_raw = apply_translations(blocks, entries, os.path.basename(json_file))
         papa_data = build_papa(blocks_raw)
+        papa_data = fit_papa_to_original_size(
+            papa_data, os.path.getsize(papa_path), os.path.basename(json_file)
+        )
         papa_files.append(papa_data)
 
     template_entries = read_xbb_template(template_xbb)
