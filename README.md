@@ -40,7 +40,7 @@ Append the bundled Korean donor glyph set to an original `mainfont.bffnt` and re
 
 If you also want the merged manifest and PNG sheets for inspection:
 ```bash
-.venv/bin/python tool_font.py build-from-font rom/ExtractedRomFS/Font/mainfont.bffnt ./KangwonBold.otf work/mainfont_from_ttf.bffnt --chars-file font/font_raw.txt --font-size 14 --keep-dir work/mainfont_from_ttf_assets 
+.venv/bin/python tool_font.py build-from-font rom/ExtractedRomFS/Font/mainfont.bffnt ./KangwonBold.ttf work/mainfont_from_ttf.bffnt --chars-file font/font_raw.txt --font-size 14 --y-offset 2 --keep-dir work/mainfont_from_ttf_assets 
 ```
 
 ### 1-4. Render Glyphs Directly From a Font File

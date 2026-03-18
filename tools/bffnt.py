@@ -467,9 +467,10 @@ class Bffnt:
 
             for code in range(cwdh['start'], cwdh['end'] + 1):
                 widths = cwdh['data'][code]
-                for key in ('left', 'glyph', 'char'):
-                    file_.write(struct.pack('=b', widths[key]))
-                    position += 1
+                file_.write(struct.pack('=b', widths['left']))
+                file_.write(struct.pack('=B', widths['glyph']))
+                file_.write(struct.pack('=B', widths['char']))
+                position += 3
 
             file_.seek(size_pos)
             file_.write(struct.pack('%sI' % self.order, position - start_pos))
